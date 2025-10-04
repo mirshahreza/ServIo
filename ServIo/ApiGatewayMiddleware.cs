@@ -7,9 +7,9 @@ using PowNet.Services;
 using System.Diagnostics;
 using System.Text;
 
-namespace AppEndApi
+namespace ServIo
 {
-	public class Trident(RequestDelegate next)
+	public class ApiGatewayMiddleware(RequestDelegate next)
 	{
 		private readonly RequestDelegate _next = next;
 		
@@ -139,13 +139,13 @@ namespace AppEndApi
 			{
 				sw.Stop();
 				rowId = context.Items["RowId"]?.ToString() ?? "";
-				if (apiConf.IsLoggingEnabled()) LogMan.LogActivity(context, actor, apiCalling, rowId, result, message, sw.ElapsedMilliseconds.ToIntSafe());
+				if (apiConf.IsLoggingEnabled()) LogManager.LogActivity(context, actor, apiCalling, rowId, result, message, sw.ElapsedMilliseconds.ToIntSafe());
 			}
 		}
 
 		private async Task HandleException(HttpContext context, ApiCallInfo apiCalling, long duration, Exception ex)
 		{
-			LogMan.LogError($"{ex.Message} : {context.Request.Path}");
+			LogManager.LogError($"{ex.Message} : {context.Request.Path}");
 			context.Response.StatusCode = StatusCodes.Status500InternalServerError;
 			context.AddInternalErrorHeaders(duration, ex, apiCalling);
 			context.Response.ContentType = "text/HTML";
@@ -153,7 +153,7 @@ namespace AppEndApi
 		}
 		private async Task HandleUnauthorizedException(HttpContext context, ApiCallInfo apiCalling, long duration, UnauthorizedAccessException ex)
 		{
-			LogMan.LogError($"{ex.Message} : {context.Request.Path}");
+			LogManager.LogError($"{ex.Message} : {context.Request.Path}");
 			context.Response.StatusCode = StatusCodes.Status401Unauthorized;
 			context.AddUnauthorizedErrorHeaders(duration, ex, apiCalling);
 			context.Response.ContentType = "text/HTML";
@@ -161,7 +161,7 @@ namespace AppEndApi
 		}
 		private async Task HandleNotFoundResource(HttpContext context, ApiCallInfo apiCalling, long duration)
 		{
-			LogMan.LogError($"Not found resource : {context.Request.Path}");
+			LogManager.LogError($"Not found resource : {context.Request.Path}");
 			context.Response.StatusCode = StatusCodes.Status404NotFound;
 			context.AddNotFoundErrorHeaders(duration, apiCalling);
 			context.Response.ContentType = "text/HTML";

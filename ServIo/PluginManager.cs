@@ -8,15 +8,15 @@ using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.Loader;
 
-namespace AppEndApi
+namespace ServIo
 {
-	public static class PluginUtil
+	public static class PluginManager
 	{
 		public static ApplicationPartManager? AppPartManager;
-		public static DynaDescriptor? AppActionDescriptor;
+		public static DynamicActionDescriptor? AppActionDescriptor;
 		public static readonly ConcurrentDictionary<string, (Assembly Assembly, PluginLoadContext Context, WeakReference ContextWeakRef)> AppLoadedPlugins = new();
 
-		public static void LoadDynamicAsmFromCode()
+		public static void LoadDynamicAssemblyFromCode()
 		{
 			FileInfo fileInfo;
 			fileInfo = new(DynamicCodeService.AsmPath);
@@ -76,11 +76,11 @@ namespace AppEndApi
 					? "Unload attempted, but context is still alive (likely due to lingering references)."
 					: "Unload successful: PluginLoadContext has been garbage collected.";
 
-				LogMan.LogDebug(unloadStatus);
+				LogManager.LogDebug(unloadStatus);
 			}
 			catch (Exception ex)
 			{
-				LogMan.LogDebug($"Error during plugin unload for '{pluginPath}': {ex.Message}");
+				LogManager.LogDebug($"Error during plugin unload for '{pluginPath}': {ex.Message}");
 				AppLoadedPlugins[pluginPath] = pluginInfo;
 			}
 		}
@@ -108,7 +108,7 @@ namespace AppEndApi
 				}
 				catch (Exception ex)
 				{
-					LogMan.LogError($"Error loading DLL {Path.GetFileName(dllFile)}: {ex.Message}");
+					LogManager.LogError($"Error loading DLL {Path.GetFileName(dllFile)}: {ex.Message}");
 				}
 			}
 		}

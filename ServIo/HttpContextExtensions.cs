@@ -7,9 +7,9 @@ using PowNet.Services;
 using System.Reflection;
 using System.Text.Json.Nodes;
 
-namespace AppEndApi
+namespace ServIo
 {
-	public static class ExtHttpContext
+	public static class HttpContextExtensions
 	{
 		public static UserServerObject ToUserServerObject(this HttpContext context)
 		{

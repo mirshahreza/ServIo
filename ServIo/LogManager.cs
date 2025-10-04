@@ -7,9 +7,9 @@ using Serilog;
 using Serilog.Sinks.MSSqlServer;
 using System.Data;
 
-namespace AppEndApi
+namespace ServIo
 {
-	public static class LogMan
+	public static class LogManager
 	{
 		private static readonly Lazy<ColumnOptions> _columnOptions = new(CreateColumnOptions);
 
@@ -72,6 +72,8 @@ namespace AppEndApi
 		{
 			Console.WriteLine(message);
 		}
+
+
 
 		public static void LogDebug(string message)
 		{

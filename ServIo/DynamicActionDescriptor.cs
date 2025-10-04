@@ -1,9 +1,9 @@
 using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.Extensions.Primitives;
 
-namespace AppEndApi
+namespace ServIo
 {
-	public class DynaDescriptor : IActionDescriptorChangeProvider
+	public class DynamicActionDescriptor : IActionDescriptorChangeProvider
 	{
 		public CancellationTokenSource TokenSource { get; private set; } = new CancellationTokenSource();
 

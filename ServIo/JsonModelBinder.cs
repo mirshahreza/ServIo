@@ -2,9 +2,9 @@ using Microsoft.AspNetCore.Mvc.ModelBinding;
 using PowNet.Extensions;
 using System.Text.Json;
 
-namespace AppEndApi
+namespace ServIo
 {
-	public class JMap : IModelBinder
+	public class JsonModelBinder : IModelBinder
 	{
 		public async Task BindModelAsync(ModelBindingContext MBC)
 		{
@@ -48,11 +48,11 @@ namespace AppEndApi
 		}
 	}
 
-	public class JMapProvider : IModelBinderProvider
+	public class JsonModelBinderProvider : IModelBinderProvider
 	{
 		public IModelBinder? GetBinder(ModelBinderProviderContext context)
 		{
-			return context == null ? throw new ArgumentNullException(nameof(context)) : (IModelBinder)new JMap();
+			return context == null ? throw new ArgumentNullException(nameof(context)) : (IModelBinder)new JsonModelBinder();
 		}
 	}
 }
