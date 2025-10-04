@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
+using PowNet.Models;
 using ServIo;
 using Xunit;
 
@@ -34,10 +35,42 @@ public class HttpContextExtensionsTests
     }
 
     [Fact]
-    public void AddCacheHeaders_Adds_XCache()
+    public void AddCacheHeader_Adds_XCache()
     {
         var ctx = new DefaultHttpContext();
-        ctx.AddCacheHeaders();
+        ctx.AddCacheHeader("HIT");
         ctx.Response.Headers.ContainsKey("X-Cache").Should().BeTrue();
+        ctx.Response.Headers["X-Cache"].ToString().Should().Be("HIT");
+    }
+
+    [Fact]
+    public void ToUserServerObject_NoToken_Returns_Nobody()
+    {
+        var ctx = new DefaultHttpContext();
+        var user = ctx.ToUserServerObject();
+        user.UserName.Should().Be(UserServerObject.NobodyUserName);
+    }
+
+    [Fact]
+    public void ToUserServerObject_WithToken_Returns_User()
+    {
+        var ctx = new DefaultHttpContext();
+        var u = new UserServerObject { Id = 5, UserName = "bob", Roles = [] };
+        var token = u.Tokenize();
+        ctx.Request.Headers["token"] = token;
+        var user = ctx.ToUserServerObject();
+        user.UserName.Should().Be("bob");
+        user.Id.Should().Be(5);
+    }
+
+    [Fact]
+    public void AddSuccessHeaders_Sets_Execution_Metadata()
+    {
+        var ctx = new DefaultHttpContext();
+        var info = new PowNet.Services.ApiCallInfo("/x/y", "NS", "Ctl", "Act");
+        ctx.AddSuccessHeaders(123, info);
+        ctx.Response.Headers["X-Execution-Controller"].ToString().Should().Be("Ctl");
+        ctx.Response.Headers["X-Execution-Action"].ToString().Should().Be("Act");
+        ctx.Response.Headers["X-Execution-Duration"].ToString().Should().Be("123");
     }
 }

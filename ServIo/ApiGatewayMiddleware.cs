@@ -1,7 +1,11 @@
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Caching.Memory;
+using PowNet.Abstractions.Api;
+using PowNet.Abstractions.Authentication;
 using PowNet.Configuration;
 using PowNet.Extensions;
+using PowNet.Implementations.Api;
+using PowNet.Implementations.Authentication;
+using PowNet.Logging;
 using PowNet.Models;
 using PowNet.Services;
 using System.Diagnostics;
@@ -9,10 +13,31 @@ using System.Text;
 
 namespace ServIo
 {
-	public class ApiGatewayMiddleware(RequestDelegate next)
+	public class ApiGatewayMiddleware
 	{
-		private readonly RequestDelegate _next = next;
-		
+		private readonly RequestDelegate _next;
+		private readonly IApiCallParser _parser;
+		private readonly IApiAuthorizationService _auth;
+		private readonly IApiCacheService _cache;
+		private readonly IActivityLogger _activity;
+		private readonly ITokenUserResolver _userResolver;
+		private static readonly Logger _log = PowNetLogger.GetLogger("ApiGateway");
+
+		public ApiGatewayMiddleware(RequestDelegate next,
+			IApiCallParser? parser = null,
+			IApiAuthorizationService? auth = null,
+			IApiCacheService? cache = null,
+			IActivityLogger? activity = null,
+			ITokenUserResolver? userResolver = null)
+		{
+			_next = next;
+			_parser = parser ?? new ApiCallParserAdapter();
+			_auth = auth ?? new ApiAuthorizationService();
+			_cache = cache ?? new ApiCacheService();
+			_activity = activity ?? new ActivityLogger();
+			_userResolver = userResolver ?? new TokenUserResolver(new DefaultUserIdentityFactory(), new InMemoryUserCache());
+		}
+
 		public async Task InvokeAsync(HttpContext context)
 		{
 			if (!context.IsPostFace())
@@ -22,50 +47,50 @@ namespace ServIo
 			}
 
 			Stopwatch sw = Stopwatch.StartNew();
-			bool result = true;
-			string message = "";
-			string rowId = "";
+			bool success = true;
+			string message = string.Empty;
+			string rowId = string.Empty;
 
-			ApiCallInfo apiCalling = context.GetAppEndWebApiInfo();
-            ControllerConfiguration controllerConf = apiCalling.GetConfig();
-			ApiConfiguration apiConf = controllerConf.ApiConfigurations.SingleOrDefault(i => i.ApiName == apiCalling.ApiName) ?? new ApiConfiguration() { ApiName = apiCalling.ApiName };
-			UserServerObject actor = context.ToUserServerObject();
+			IApiCallInfo call = _parser.Parse(context);
+			var apiCallInfo = call as PowNet.Services.ApiCallInfo ?? context.GetApiCallInfo();
+			var controllerConf = apiCallInfo.GetConfig();
+			var apiConf = controllerConf.ApiConfigurations.SingleOrDefault(i => i.ApiName == apiCallInfo.ApiName) ?? new ApiConfiguration() { ApiName = apiCallInfo.ApiName };
+
+			IUserIdentity user = _userResolver.ResolveFromHttpContext(context);
 
 			if (context.IsPostFace()) context.Request.EnableBuffering();
 
+			string? cacheKey = null;
+
 			try
 			{
-				if (string.IsNullOrEmpty(apiCalling.ControllerName) || string.IsNullOrEmpty(apiCalling.ApiName))
-				{
+				if (string.IsNullOrEmpty(call.Controller) || string.IsNullOrEmpty(call.Action))
 					throw new EndPointNotFoundException($"Not found resource : {context.Request.Path}");
-				}
 
-				if (!actor.HasAccess(apiConf)) throw new UnauthorizedAccessException($"Access denied to the {apiCalling.NamespaceName}.{apiCalling.ControllerName}.{apiCalling.ApiName}.");
+				if (!_auth.HasAccess(user, new ApiConfigurationAdapter(apiConf)))
+					throw new UnauthorizedAccessException($"Access denied to the {call.Namespace}.{call.Controller}.{call.Action}.");
 
-				string? cacheKey = null;
 				if (apiConf.IsCachingEnabled())
 				{
-					cacheKey = apiCalling.GetCacheKey(apiConf, actor);
-					if (MemoryService.SharedMemoryCache.TryGetValue(cacheKey, out CacheObject? cacheObject))
+					cacheKey = _cache.BuildKey(call, user, new ApiConfigurationAdapter(apiConf));
+					if (_cache.TryGet(cacheKey, out var cached) && cached is not null)
 					{
-						// Cache HIT
 						sw.Stop();
 						context.Response.StatusCode = StatusCodes.Status200OK;
-						context.Response.ContentType = cacheObject.ContentType;
-						context.AddCacheHeaders();
-						context.Response.Headers["X-Cache"] = "HIT";
-						context.AddSuccessHeaders(sw.ElapsedMilliseconds, apiCalling);
-						await context.Response.WriteAsync(cacheObject.Content, Encoding.UTF8);
-						rowId = context.Items["RowId"]?.ToString() ?? "";
-						if (apiConf.IsLoggingEnabled()) LogManager.LogActivity(context, actor, apiCalling, rowId, result, message, sw.ElapsedMilliseconds.ToIntSafe());
+						context.Response.ContentType = cached.ContentType;
+						context.AddCacheHeader("HIT");
+						context.AddSuccessHeaders(sw.ElapsedMilliseconds, apiCallInfo);
+						await context.Response.WriteAsync(cached.Content, Encoding.UTF8);
+						rowId = context.Items["RowId"]?.ToString() ?? string.Empty;
+						if (apiConf.IsLoggingEnabled()) _activity.LogActivity(context, user, call, rowId, success, message, sw.ElapsedMilliseconds.ToIntSafe());
 						return;
 					}
 				}
 
-				// Cache MISS path: capture response body so we can store it after pipeline executes.
 				MemoryStream? captureStream = null;
 				Stream? originalBody = null;
-				if (apiConf.IsCachingEnabled())
+				bool capture = apiConf.IsCachingEnabled();
+				if (capture)
 				{
 					originalBody = context.Response.Body;
 					captureStream = new MemoryStream();
@@ -75,63 +100,52 @@ namespace ServIo
 				context.Response.OnStarting(() =>
 				{
 					context.Response.StatusCode = StatusCodes.Status200OK;
-					context.AddSuccessHeaders(sw.ElapsedMilliseconds, apiCalling);
+					context.AddSuccessHeaders(sw.ElapsedMilliseconds, apiCallInfo);
 					return Task.CompletedTask;
 				});
 
 				await _next(context);
 
-				if (apiConf.IsCachingEnabled() && captureStream != null && originalBody != null)
+				if (capture && captureStream != null && originalBody != null && cacheKey != null)
 				{
-					await CaptureAndCacheResponseAsync(context, captureStream, originalBody, cacheKey!, apiConf);
+					await CaptureAndCacheAsync(context, captureStream, originalBody, cacheKey, apiConf);
 				}
 			}
 			catch (EndPointNotFoundException ex)
 			{
-				result = false;
-				message = ex.Message;
-				await HandleNotFoundResource(context, apiCalling, sw.ElapsedMilliseconds);
+				success = false; message = ex.Message;
+				await HandleNotFound(context, apiCallInfo, sw.ElapsedMilliseconds);
 			}
 			catch (UnauthorizedAccessException ex)
 			{
-				result = false;
-				message = ex.Message;
-				await HandleUnauthorizedException(context, apiCalling, sw.ElapsedMilliseconds, ex);
+				success = false; message = ex.Message;
+				await HandleUnauthorized(context, apiCallInfo, sw.ElapsedMilliseconds, ex);
 			}
 			catch (Exception ex)
 			{
-				result = false;
-				message = ex.Message;
-				await HandleException(context, apiCalling, sw.ElapsedMilliseconds, ex);
+				success = false; message = ex.Message;
+				await HandleError(context, apiCallInfo, sw.ElapsedMilliseconds, ex);
 			}
 			finally
 			{
 				sw.Stop();
-				rowId = context.Items["RowId"]?.ToString() ?? "";
-				if (apiConf.IsLoggingEnabled()) LogManager.LogActivity(context, actor, apiCalling, rowId, result, message, sw.ElapsedMilliseconds.ToIntSafe());
+				rowId = context.Items["RowId"]?.ToString() ?? string.Empty;
+				if (apiConf.IsLoggingEnabled()) _activity.LogActivity(context, user, call, rowId, success, message, sw.ElapsedMilliseconds.ToIntSafe());
 			}
 		}
 
-		private static async Task CaptureAndCacheResponseAsync(HttpContext context, MemoryStream captureStream, Stream originalBody, string cacheKey, ApiConfiguration apiConf)
+		private async Task CaptureAndCacheAsync(HttpContext context, MemoryStream captureStream, Stream originalBody, string cacheKey, ApiConfiguration apiConf)
 		{
 			try
 			{
 				captureStream.Position = 0;
 				if (context.Response.StatusCode == StatusCodes.Status200OK)
 				{
-					string bodyText = await new StreamReader(captureStream, Encoding.UTF8, leaveOpen: true).ReadToEndAsync();
-					captureStream.Position = 0; // Reset for copy back
-
-					CacheObject cacheObject = new()
-					{
-						Content = bodyText,
-						ContentType = context.Response.ContentType
-					};
-					MemoryService.SharedMemoryCache.Set(cacheKey, cacheObject, apiConf.GetCacheOptions());
-					context.AddCacheHeaders();
-					context.Response.Headers["X-Cache"] = "MISS";
+					string body = await new StreamReader(captureStream, Encoding.UTF8, leaveOpen: true).ReadToEndAsync();
+					captureStream.Position = 0;
+					_cache.Set(cacheKey, new PowNet.Abstractions.Api.CachedApiResponse(body, context.Response.ContentType), TimeSpan.FromSeconds(apiConf.CacheSeconds));
+					context.AddCacheHeader("MISS");
 				}
-				// Copy the content back to the original stream
 				await captureStream.CopyToAsync(originalBody);
 			}
 			finally
@@ -141,36 +155,44 @@ namespace ServIo
 			}
 		}
 
-		private async Task HandleException(HttpContext context, ApiCallInfo apiCalling, long duration, Exception ex)
+		private async Task HandleError(HttpContext context, PowNet.Services.ApiCallInfo call, long dur, Exception ex)
 		{
-			LogManager.LogError($"{ex.Message} : {context.Request.Path}");
+			_log.LogError("{Error} : {Path}", ex.Message, context.Request.Path);
 			context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-			context.AddInternalErrorHeaders(duration, ex, apiCalling);
+			context.AddInternalErrorHeaders(dur, ex, call);
 			context.Response.ContentType = "text/HTML";
 			await context.Response.WriteAsync($"Message : {ex.Message + Environment.NewLine + ex.StackTrace}");
 		}
-		private async Task HandleUnauthorizedException(HttpContext context, ApiCallInfo apiCalling, long duration, UnauthorizedAccessException ex)
+		private async Task HandleUnauthorized(HttpContext context, PowNet.Services.ApiCallInfo call, long dur, UnauthorizedAccessException ex)
 		{
-			LogManager.LogError($"{ex.Message} : {context.Request.Path}");
+			_log.LogError("{Error} : {Path}", ex.Message, context.Request.Path);
 			context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-			context.AddUnauthorizedErrorHeaders(duration, ex, apiCalling);
+			context.AddUnauthorizedErrorHeaders(dur, ex, call);
 			context.Response.ContentType = "text/HTML";
 			await context.Response.WriteAsync(ex.Message + Environment.NewLine + ex.StackTrace);
 		}
-		private async Task HandleNotFoundResource(HttpContext context, ApiCallInfo apiCalling, long duration)
+		private async Task HandleNotFound(HttpContext context, PowNet.Services.ApiCallInfo call, long dur)
 		{
-			LogManager.LogError($"Not found resource : {context.Request.Path}");
+			_log.LogWarning("Not found resource : {Path}", context.Request.Path);
 			context.Response.StatusCode = StatusCodes.Status404NotFound;
-			context.AddNotFoundErrorHeaders(duration, apiCalling);
+			context.AddNotFoundErrorHeaders(dur, call);
 			context.Response.ContentType = "text/HTML";
-			await context.Response.WriteAsync("");
+			await context.Response.WriteAsync(string.Empty);
 		}
 
-		// Local cache DTO (fallback if framework one not available)
-		private sealed class CacheObject
+		private sealed class ApiCallParserAdapter : IApiCallParser
 		{
-			public string Content { get; set; } = string.Empty;
-			public string? ContentType { get; set; }
+			public IApiCallInfo Parse(HttpContext httpContext) => httpContext.GetApiCallInfo();
+		}
+
+		private sealed class ApiConfigurationAdapter : IApiConfiguration
+		{
+			private readonly ApiConfiguration _inner;
+			public ApiConfigurationAdapter(ApiConfiguration inner) => _inner = inner;
+			public string ApiName => _inner.ApiName;
+			public bool CachingEnabled => _inner.IsCachingEnabled();
+			public bool LoggingEnabled => _inner.IsLoggingEnabled();
+			public TimeSpan? AbsoluteCacheDuration => _inner.IsCachingEnabled() ? TimeSpan.FromSeconds(_inner.CacheSeconds) : null;
 		}
 	}
 

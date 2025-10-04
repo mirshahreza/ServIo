@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.ApplicationParts;
 using PowNet.Configuration;
 using PowNet.Extensions;
 using PowNet.Services;
+using PowNet.Logging;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
@@ -17,24 +18,17 @@ namespace ServIo
 	/// </summary>
 	public static class PluginManager
 	{
-		/// <summary>ASP.NET Core application part manager (should be assigned during startup).</summary>
 		public static ApplicationPartManager? AppPartManager;
-		/// <summary>Action descriptor change provider to notify MVC to refresh its action descriptors.</summary>
 		public static DynamicActionDescriptor? AppActionDescriptor;
 
-		#region Internal state
 		private static readonly ConcurrentDictionary<string, PluginHandle> _handles = new(StringComparer.OrdinalIgnoreCase);
 		private static readonly ConcurrentDictionary<string, Assembly?> _dependencyCache = new(StringComparer.OrdinalIgnoreCase);
 		private static int _resolverHooked;
 		private static readonly object _appPartLock = new();
 		private const int UnloadGcMaxIterations = 10;
 		private const int UnloadGcIterationDelayMs = 100; // ms
-		#endregion
+		private static readonly Logger _log = PowNetLogger.GetLogger("PluginManager");
 
-		#region Public API - Load from dynamic code (build pipeline)
-		/// <summary>
-		/// Builds dynamic code (if any) then (re)loads its assembly in a collectible context.
-		/// </summary>
 		public static PluginLoadResult LoadDynamicAssemblyFromCode()
 		{
 			var swTotal = Stopwatch.StartNew();
@@ -43,7 +37,6 @@ namespace ServIo
 
 			if (fileInfo.Exists)
 			{
-				// Ensure previous dynamic assembly unloaded (best-effort)
 				UnloadPlugin(fileInfo.FullName);
 			}
 
@@ -55,7 +48,7 @@ namespace ServIo
 			catch (Exception ex)
 			{
 				buildActivity?.SetStatus(ActivityStatusCode.Error, ex.Message);
-				LogManager.LogError($"Dynamic build failed: {ex.Message}");
+				_log.LogError("Dynamic build failed: {Error}", ex.Message);
 				return PluginLoadResult.Failed(DynamicCodeService.AsmPath, ex);
 			}
 			finally { buildActivity?.Dispose(); }
@@ -70,19 +63,10 @@ namespace ServIo
 			result = result with { Duration = swTotal.Elapsed };
 			return result;
 		}
-		#endregion
 
-		#region Public API - Loading / Unloading
-		/// <summary>Loads a plugin assembly (collectible).</summary>
 		public static PluginLoadResult LoadPlugin(string dllFullPath) => LoadPluginInternal(dllFullPath, isDynamic: false);
-		/// <summary>Unloads a plugin assembly.</summary>
 		public static PluginUnloadResult UnloadPlugin(string pluginPath) => UnloadInternal(pluginPath);
-		#endregion
 
-		#region Public API - Bulk loading
-		/// <summary>
-		/// Loads all plugin DLLs found in configured plugin directory (collectible contexts). Skips already loaded & dynamic assembly.
-		/// </summary>
 		public static IReadOnlyList<PluginLoadResult> LoadPlugins()
 		{
 			HookResolverOnce();
@@ -98,21 +82,15 @@ namespace ServIo
 			}
 			return results;
 		}
-		#endregion
 
-		#region Public API - Query
-		/// <summary>Returns snapshot of current plugin handles.</summary>
 		public static IReadOnlyCollection<PluginHandle> GetPluginHandles() => _handles.Values.ToList().AsReadOnly();
 
-		/// <summary>Attempts to get a plugin handle by path (case-insensitive).</summary>
 		public static bool TryGetPlugin(string path, out PluginHandle handle)
 		{
 			var normalized = NormalizePath(path);
 			return _handles.TryGetValue(normalized, out handle!);
 		}
-		#endregion
 
-		#region Internal core logic
 		private static PluginLoadResult LoadPluginInternal(string dllFullPath, bool isDynamic)
 		{
 			var sw = Stopwatch.StartNew();
@@ -158,7 +136,7 @@ namespace ServIo
 				?.SetStatus(ActivityStatusCode.Ok);
 			loadActivity?.Dispose();
 
-			LogManager.LogDebug($"Plugin loaded: {assembly.GetName().Name} v{assembly.GetName().Version} (Dynamic={isDynamic}) Path={normalizedPath}");
+			_log.LogDebug("Plugin loaded: {Name} v{Version} Dynamic={Dynamic} Path={Path}", assembly.GetName().Name, assembly.GetName().Version?.ToString(), isDynamic, normalizedPath);
 			return PluginLoadResult.Successful(normalizedPath, assembly, sw.Elapsed, isDynamic, fileInfo.Length);
 		}
 
@@ -195,7 +173,6 @@ namespace ServIo
 			catch (Exception ex)
 			{
 				error = ex;
-				// revert on failure
 				_handles[normalizedPath] = handle;
 			}
 
@@ -203,20 +180,18 @@ namespace ServIo
 			if (error != null || alive)
 			{
 				string msg = error != null ? $"Error during plugin unload for '{normalizedPath}': {error.Message}" : $"Unload attempted, context still alive after {gcLoops} GC cycles.";
-				LogManager.LogDebug(msg);
+				_log.LogDebug(msg);
 				unloadActivity?.SetStatus(ActivityStatusCode.Error, msg);
 				unloadActivity?.Dispose();
 				return PluginUnloadResult.Failed(normalizedPath, error ?? new InvalidOperationException("Context still alive"), sw.Elapsed, gcLoops, alive);
 			}
 
-			LogManager.LogDebug($"Plugin unloaded: {normalizedPath} (GC loops={gcLoops})");
+			_log.LogDebug("Plugin unloaded: {Path} (GC loops={Loops})", normalizedPath, gcLoops);
 			unloadActivity?.SetStatus(ActivityStatusCode.Ok);
 			unloadActivity?.Dispose();
 			return PluginUnloadResult.Successful(normalizedPath, sw.Elapsed, gcLoops);
 		}
-		#endregion
 
-		#region Dependency resolving
 		private static void HookResolverOnce()
 		{
 			if (Interlocked.Exchange(ref _resolverHooked, 1) == 0)
@@ -245,14 +220,12 @@ namespace ServIo
 			}
 			catch (Exception ex)
 			{
-				LogManager.LogDebug($"Dependency resolve failed for {simple}: {ex.Message}");
+				_log.LogDebug("Dependency resolve failed for {Assembly}: {Err}", simple, ex.Message);
 			}
-			_dependencyCache[simple] = resolved; // cache null as negative lookup too
+			_dependencyCache[simple] = resolved;
 			return resolved;
 		}
-		#endregion
 
-		#region Helpers & utilities
 		private static string NormalizePath(string path) => Path.GetFullPath(path);
 		private static void TryUnloadContextSilent(PluginLoadContext ctx) { try { ctx.Unload(); } catch { } }
 		private static Activity? StartActivity(string name, string? path = null)
@@ -261,10 +234,8 @@ namespace ServIo
 			if (path != null) activity.AddTag("plugin.path", path);
 			return activity;
 		}
-		#endregion
 	}
 
-	#region Models
 	public sealed record PluginHandle(
 		string Path,
 		Assembly Assembly,
@@ -298,13 +269,10 @@ namespace ServIo
 		public static PluginUnloadResult Successful(string path, TimeSpan duration, int gcLoops) => new(true, path, duration, null, gcLoops, false);
 		public static PluginUnloadResult Failed(string path, Exception error, TimeSpan? duration = null, int gcLoops = 0, bool alive = false) => new(false, path, duration ?? TimeSpan.Zero, error, gcLoops, alive);
 	}
-	#endregion
 
-	#region Custom exceptions
 	public class PluginLoadException : Exception { public string PluginPath { get; } public PluginLoadException(string path, Exception inner) : base($"Failed to load plugin '{path}': {inner.Message}", inner) => PluginPath = path; }
 	public class PluginUnloadException : Exception { public string PluginPath { get; } public PluginUnloadException(string path, Exception inner) : base($"Failed to unload plugin '{path}': {inner.Message}", inner) => PluginPath = path; }
 	public class PluginAlreadyLoadedException : Exception { public string PluginPath { get; } public PluginAlreadyLoadedException(string path) : base($"Plugin already loaded: {path}") => PluginPath = path; }
-	#endregion
 
 	public class PluginLoadContext : AssemblyLoadContext
 	{
