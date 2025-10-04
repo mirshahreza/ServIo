@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="ServIo.Test/ServIo.Test.csproj" Id="abf1fcd2-8c9e-443a-a008-847a0be200b5" />
   <Project Path="ServIo/ServIo.csproj" />
 </Solution>
