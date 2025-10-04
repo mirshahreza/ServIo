@@ -4,6 +4,7 @@ using PowNet.Configuration;
 using PowNet.Extensions;
 using PowNet.Models;
 using PowNet.Services;
+using System;
 using System.Reflection;
 using System.Text.Json.Nodes;
 
@@ -13,8 +14,7 @@ namespace ServIo
 	{
 		public static UserServerObject ToUserServerObject(this HttpContext context)
 		{
-			if (!context.Request.Headers.TryGetValue("token", out Microsoft.Extensions.Primitives.StringValues token)) 
-				return UserServerObject.NobodyUserServerObject;
+			if (!context.Request.Headers.TryGetValue("token", out Microsoft.Extensions.Primitives.StringValues token)) return UserServerObject.NobodyUserServerObject;
 			return TokenToUserServerObject(token.ToString());
 		}
 
@@ -25,10 +25,13 @@ namespace ServIo
 			JsonObject u;
 			try
 			{
-				u = token.ToStringEmpty().Replace("bearer ", "").Decode(PowNetConfiguration.EncryptionSecret).ToJsonObjectByBuiltIn();
+                string tokenValue = token.ToStringEmpty();
+                if (tokenValue.StartsWith("bearer ", StringComparison.OrdinalIgnoreCase)) tokenValue = tokenValue.Substring(7);
+                u = tokenValue.Decode(PowNetConfiguration.EncryptionSecret).ToJsonObjectByBuiltIn();
 			}
-			catch
+			catch(Exception ex)
 			{
+				//TODO: Log the exception ex for debugging purposes
 				return UserServerObject.NobodyUserServerObject;
 			}			
 			
@@ -41,26 +44,38 @@ namespace ServIo
 
 		public static UserServerObject CreateUserServerObjectFromDb(string userName)
 		{
-			Type? type = DynamicCodeService.DynaAsm.GetType("Zzz.AppEndCoreApi");
+			string? creatorType = PowNetConfiguration.PowNetSection["UserServerObjectCreatorType"].ToStringEmpty();
+			string? creatorMethod = PowNetConfiguration.PowNetSection["UserServerObjectCreatorMethod"].ToStringEmpty();
+
+			if (string.IsNullOrEmpty(creatorType))
+			{
+				throw new InvalidOperationException("UserServerObjectCreatorType is not configured in PowNet settings.");
+			}
+			if (string.IsNullOrEmpty(creatorMethod))
+			{
+				throw new InvalidOperationException("UserServerObjectCreatorMethod is not configured in PowNet settings.");
+			}
+
+			Type? type = DynamicCodeService.DynaAsm.GetType(creatorType);
 			if (type is not null)
 			{
 				var typeInstance = Activator.CreateInstance(type);
-				MethodInfo? m = type.GetMethod("CreateUserServerObject");
+				MethodInfo? m = type.GetMethod(creatorMethod);
 				if (m != null)
 				{
 					UserServerObject? user = (UserServerObject?)m.Invoke(typeInstance, [userName]);
-					if (user is null) throw new Exception("User activation error!!!");
+					if (user is null) throw new InvalidOperationException("User activation error!!!");
 					user.ToCache();
 					return user;
 				}
 				else
 				{
-					throw new Exception("CreateUserServerObject is not exist on AppEndCore class");
+					throw new MissingMethodException($"{creatorMethod} is not exist on {creatorType} class");
 				}
 			}
 			else
 			{
-				throw new Exception("AppEndCore is not exist");
+				throw new TypeLoadException($"{creatorType} is not exist");
 			}
 		}
 

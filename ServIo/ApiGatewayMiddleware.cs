@@ -33,15 +33,13 @@ namespace ServIo
 
 			if (context.IsPostFace()) context.Request.EnableBuffering();
 
-			if (string.IsNullOrEmpty(apiCalling.ControllerName) || string.IsNullOrEmpty(apiCalling.ApiName))
-			{
-				sw.Stop();
-				await HandleNotFoundResource(context, apiCalling, sw.ElapsedMilliseconds);
-				return;
-			}
-
 			try
 			{
+				if (string.IsNullOrEmpty(apiCalling.ControllerName) || string.IsNullOrEmpty(apiCalling.ApiName))
+				{
+					throw new EndPointNotFoundException($"Not found resource : {context.Request.Path}");
+				}
+
 				if (!actor.HasAccess(apiConf)) throw new UnauthorizedAccessException($"Access denied to the {apiCalling.NamespaceName}.{apiCalling.ControllerName}.{apiCalling.ApiName}.");
 
 				string? cacheKey = null;
@@ -59,6 +57,7 @@ namespace ServIo
 						context.AddSuccessHeaders(sw.ElapsedMilliseconds, apiCalling);
 						await context.Response.WriteAsync(cacheObject.Content, Encoding.UTF8);
 						rowId = context.Items["RowId"]?.ToString() ?? "";
+						if (apiConf.IsLoggingEnabled()) LogManager.LogActivity(context, actor, apiCalling, rowId, result, message, sw.ElapsedMilliseconds.ToIntSafe());
 						return;
 					}
 				}
@@ -80,59 +79,29 @@ namespace ServIo
 					return Task.CompletedTask;
 				});
 
-				try
+				await _next(context);
+
+				if (apiConf.IsCachingEnabled() && captureStream != null && originalBody != null)
 				{
-					await _next(context);
+					await CaptureAndCacheResponseAsync(context, captureStream, originalBody, cacheKey!, apiConf);
 				}
-				finally
-				{
-					// Finalize caching after response is generated
-					if (captureStream is not null && originalBody is not null)
-					{
-						try
-						{
-							captureStream.Position = 0;
-							if (context.Response.StatusCode == StatusCodes.Status200OK)
-							{
-								string bodyText = await new StreamReader(captureStream, Encoding.UTF8, leaveOpen: true).ReadToEndAsync();
-								captureStream.Position = 0; // reset for copy back
-								if (apiConf.IsCachingEnabled())
-								{
-									CacheObject cacheObject = new()
-									{
-										Content = bodyText,
-										ContentType = context.Response.ContentType
-									};
-									MemoryService.SharedMemoryCache.Set(cacheKey!, cacheObject, apiConf.GetCacheOptions());
-									context.AddCacheHeaders();
-									context.Response.Headers["X-Cache"] = "MISS";
-								}
-							}
-							// Copy the (possibly cached) content back to the original stream
-							await captureStream.CopyToAsync(originalBody);
-							context.Response.Body = originalBody;
-						}
-						finally
-						{
-							captureStream?.Dispose();
-						}
-					}
-				}
+			}
+			catch (EndPointNotFoundException ex)
+			{
+				result = false;
+				message = ex.Message;
+				await HandleNotFoundResource(context, apiCalling, sw.ElapsedMilliseconds);
 			}
 			catch (UnauthorizedAccessException ex)
 			{
-				sw.Stop();
 				result = false;
 				message = ex.Message;
-				rowId = context.Items["RowId"]?.ToString() ?? "";
 				await HandleUnauthorizedException(context, apiCalling, sw.ElapsedMilliseconds, ex);
 			}
 			catch (Exception ex)
 			{
-				sw.Stop();
 				result = false;
 				message = ex.Message;
-				rowId = context.Items["RowId"]?.ToString() ?? "";
 				await HandleException(context, apiCalling, sw.ElapsedMilliseconds, ex);
 			}
 			finally
@@ -140,6 +109,35 @@ namespace ServIo
 				sw.Stop();
 				rowId = context.Items["RowId"]?.ToString() ?? "";
 				if (apiConf.IsLoggingEnabled()) LogManager.LogActivity(context, actor, apiCalling, rowId, result, message, sw.ElapsedMilliseconds.ToIntSafe());
+			}
+		}
+
+		private static async Task CaptureAndCacheResponseAsync(HttpContext context, MemoryStream captureStream, Stream originalBody, string cacheKey, ApiConfiguration apiConf)
+		{
+			try
+			{
+				captureStream.Position = 0;
+				if (context.Response.StatusCode == StatusCodes.Status200OK)
+				{
+					string bodyText = await new StreamReader(captureStream, Encoding.UTF8, leaveOpen: true).ReadToEndAsync();
+					captureStream.Position = 0; // Reset for copy back
+
+					CacheObject cacheObject = new()
+					{
+						Content = bodyText,
+						ContentType = context.Response.ContentType
+					};
+					MemoryService.SharedMemoryCache.Set(cacheKey, cacheObject, apiConf.GetCacheOptions());
+					context.AddCacheHeaders();
+					context.Response.Headers["X-Cache"] = "MISS";
+				}
+				// Copy the content back to the original stream
+				await captureStream.CopyToAsync(originalBody);
+			}
+			finally
+			{
+				context.Response.Body = originalBody;
+				captureStream.Dispose();
 			}
 		}
 
@@ -175,4 +173,6 @@ namespace ServIo
 			public string? ContentType { get; set; }
 		}
 	}
+
+	public class EndPointNotFoundException(string message) : Exception(message);
 }

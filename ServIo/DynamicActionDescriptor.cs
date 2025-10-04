@@ -5,6 +5,7 @@ namespace ServIo
 {
 	public class DynamicActionDescriptor : IActionDescriptorChangeProvider
 	{
+		private readonly object _lock = new object();
 		public CancellationTokenSource TokenSource { get; private set; } = new CancellationTokenSource();
 
 		public IChangeToken GetChangeToken()
@@ -14,9 +15,12 @@ namespace ServIo
 
 		public void NotifyChange()
 		{
-			CancellationTokenSource oldTokenSource = TokenSource;
-			TokenSource = new CancellationTokenSource();
-			oldTokenSource.Cancel();
+			lock (_lock)
+			{
+				CancellationTokenSource oldTokenSource = TokenSource;
+				TokenSource = new CancellationTokenSource();
+				oldTokenSource.Cancel();
+			}
 		}
 	}
 }
