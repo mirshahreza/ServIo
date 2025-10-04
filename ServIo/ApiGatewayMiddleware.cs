@@ -8,6 +8,7 @@ using PowNet.Implementations.Authentication;
 using PowNet.Logging;
 using PowNet.Models;
 using PowNet.Services;
+using ServIo.Implementations;
 using System.Diagnostics;
 using System.Text;
 
@@ -33,7 +34,7 @@ namespace ServIo
 			_next = next;
 			_parser = parser ?? new ApiCallParserAdapter();
 			_auth = auth ?? new ApiAuthorizationService();
-			_cache = cache ?? new ApiCacheService();
+			_cache = cache ?? new SizedApiCacheService();
 			_activity = activity ?? new ActivityLogger();
 			_userResolver = userResolver ?? new TokenUserResolver(new DefaultUserIdentityFactory(), new InMemoryUserCache());
 		}
@@ -67,12 +68,17 @@ namespace ServIo
 				if (string.IsNullOrEmpty(call.Controller) || string.IsNullOrEmpty(call.Action))
 					throw new EndPointNotFoundException($"Not found resource : {context.Request.Path}");
 
+				// Local rule evaluation to honor full ApiConfiguration (DeniedUsers, etc.)
+				if (!EvaluateAccessRules(user, apiConf))
+					throw new UnauthorizedAccessException($"Access denied to the {call.Namespace}.{call.Controller}.{call.Action}.");
+
+				// Fallback to generic auth (still executes for consistency / future expansion)
 				if (!_auth.HasAccess(user, new ApiConfigurationAdapter(apiConf)))
 					throw new UnauthorizedAccessException($"Access denied to the {call.Namespace}.{call.Controller}.{call.Action}.");
 
 				if (apiConf.IsCachingEnabled())
 				{
-					cacheKey = _cache.BuildKey(call, user, new ApiConfigurationAdapter(apiConf));
+					cacheKey = BuildCacheKey(call, user, apiConf);
 					if (_cache.TryGet(cacheKey, out var cached) && cached is not null)
 					{
 						sw.Stop();
@@ -132,6 +138,28 @@ namespace ServIo
 				rowId = context.Items["RowId"]?.ToString() ?? string.Empty;
 				if (apiConf.IsLoggingEnabled()) _activity.LogActivity(context, user, call, rowId, success, message, sw.ElapsedMilliseconds.ToIntSafe());
 			}
+		}
+
+		private static string BuildCacheKey(IApiCallInfo call, IUserIdentity user, ApiConfiguration apiConf)
+		{
+			bool perUser = apiConf.CacheLevel == PowNet.Common.CacheLevel.PerUser;
+			return $"Response::{call.Controller}_{call.Action}{(perUser ? "_" + user.UserName : string.Empty)}";
+		}
+
+		private static bool EvaluateAccessRules(IUserIdentity identity, ApiConfiguration apiConf)
+		{
+			if (identity is not UserServerObject uso) return !identity.IsAnonymous; // fallback
+			// Deny rules first
+			if (apiConf.DeniedUsers?.Contains(uso.Id) == true) return false;
+			if (apiConf.DeniedRoles?.Count > 0 && uso.Roles?.Count > 0 && apiConf.DeniedRoles.HasIntersect(uso.Roles.Select(r => r.Id).ToList())) return false;
+			// Allow rules
+			if (apiConf.AllowedUsers?.Contains(uso.Id) == true) return true;
+			if (apiConf.AllowedRoles?.HasIntersect(uso.Roles.Select(r => r.Id).ToList()) == true) return true;
+			// Open rules
+			if (apiConf.CheckAccessLevel == PowNet.Common.CheckAccessLevel.OpenForAllUsers) return true;
+			if (apiConf.CheckAccessLevel == PowNet.Common.CheckAccessLevel.OpenForAuthenticatedUsers && !uso.IsAnonymous) return true;
+			// Default: if no explicit allow lists specified -> deny (secure by default)
+			return false;
 		}
 
 		private async Task CaptureAndCacheAsync(HttpContext context, MemoryStream captureStream, Stream originalBody, string cacheKey, ApiConfiguration apiConf)

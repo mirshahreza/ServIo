@@ -63,15 +63,15 @@ namespace ServIo
 
 		private static void AddAppEndStandardHeaders(this HttpContext context, long duration, PowNet.Services.ApiCallInfo appEndWebApiInfo, int statusCode, string statusTitle)
 		{
-			context.Response.Headers.TryAdd("Server", "AppEnd");
-			context.Response.Headers.TryAdd("InstanceName", PowNetConfiguration.PowNetSection["InstanceName"].ToStringEmpty());
-			context.Response.Headers.TryAdd("X-Execution-Path", appEndWebApiInfo.RequestPath);
-			context.Response.Headers.TryAdd("X-Execution-Controller", appEndWebApiInfo.ControllerName);
-			context.Response.Headers.TryAdd("X-Execution-Action", appEndWebApiInfo.ApiName);
-			context.Response.Headers.TryAdd("X-Execution-Duration", duration.ToString());
-			context.Response.Headers.TryAdd("X-Execution-User", context.User.Identity?.Name);
-			context.Response.Headers.TryAdd("X-Result-StatusCode", statusCode.ToString());
-			context.Response.Headers.TryAdd("X-Result-StatusTitle", statusTitle);
+			context.Response.Headers["Server"] = "AppEnd";
+			context.Response.Headers["InstanceName"] = PowNetConfiguration.PowNetSection["InstanceName"].ToStringEmpty();
+			context.Response.Headers["X-Execution-Path"] = appEndWebApiInfo.RequestPath;
+			context.Response.Headers["X-Execution-Controller"] = appEndWebApiInfo.ControllerName;
+			context.Response.Headers["X-Execution-Action"] = appEndWebApiInfo.ApiName;
+			context.Response.Headers["X-Execution-Duration"] = duration.ToString();
+			context.Response.Headers["X-Execution-User"] = context.User.Identity?.Name ?? string.Empty;
+			context.Response.Headers["X-Result-StatusCode"] = statusCode.ToString();
+			context.Response.Headers["X-Result-StatusTitle"] = statusTitle;
 		}
 
 		public static void AddCacheHeader(this HttpContext context, string value) => context.Response.Headers["X-Cache"] = value;

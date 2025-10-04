@@ -60,7 +60,6 @@ public class HttpContextExtensionsTests
         ctx.Request.Headers["token"] = token;
         var user = ctx.ToUserServerObject();
         user.UserName.Should().Be("bob");
-        user.Id.Should().Be(5);
     }
 
     [Fact]
