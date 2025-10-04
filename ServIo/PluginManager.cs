@@ -5,125 +5,311 @@ using PowNet.Configuration;
 using PowNet.Extensions;
 using PowNet.Services;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.Loader;
 
 namespace ServIo
 {
+	/// <summary>
+	/// Manages dynamic (collectible) plugin assemblies: load, unload, and discovery.
+	/// Provides result models and safety improvements.
+	/// </summary>
 	public static class PluginManager
 	{
+		/// <summary>ASP.NET Core application part manager (should be assigned during startup).</summary>
 		public static ApplicationPartManager? AppPartManager;
+		/// <summary>Action descriptor change provider to notify MVC to refresh its action descriptors.</summary>
 		public static DynamicActionDescriptor? AppActionDescriptor;
-		public static readonly ConcurrentDictionary<string, (Assembly Assembly, PluginLoadContext Context, WeakReference ContextWeakRef)> AppLoadedPlugins = new();
 
-		public static void LoadDynamicAssemblyFromCode()
+		#region Internal state
+		private static readonly ConcurrentDictionary<string, PluginHandle> _handles = new(StringComparer.OrdinalIgnoreCase);
+		private static readonly ConcurrentDictionary<string, Assembly?> _dependencyCache = new(StringComparer.OrdinalIgnoreCase);
+		private static int _resolverHooked;
+		private static readonly object _appPartLock = new();
+		private const int UnloadGcMaxIterations = 10;
+		private const int UnloadGcIterationDelayMs = 100; // ms
+		#endregion
+
+		#region Public API - Load from dynamic code (build pipeline)
+		/// <summary>
+		/// Builds dynamic code (if any) then (re)loads its assembly in a collectible context.
+		/// </summary>
+		public static PluginLoadResult LoadDynamicAssemblyFromCode()
 		{
-			FileInfo fileInfo;
-			fileInfo = new(DynamicCodeService.AsmPath);
-			if (fileInfo.Exists) UnloadPlugin(fileInfo.FullName);
-            DynamicCodeService.Build();
-			fileInfo = new(DynamicCodeService.AsmPath);
-			AssemblyLoadContext.Default.Resolving += ResolveDependencies;
-			Load(fileInfo.FullName);
-		}
+			var swTotal = Stopwatch.StartNew();
+			HookResolverOnce();
+			FileInfo fileInfo = new(DynamicCodeService.AsmPath);
 
-		public static void Load(string dllFullPath)
-		{
-			if (AppLoadedPlugins.ContainsKey(dllFullPath)) throw new Exception($"Plugin '{dllFullPath}' is already loaded.");
+			if (fileInfo.Exists)
+			{
+				// Ensure previous dynamic assembly unloaded (best-effort)
+				UnloadPlugin(fileInfo.FullName);
+			}
 
-			var pluginLoadContext = new PluginLoadContext(dllFullPath);
+			var buildActivity = StartActivity("DynamicAssembly.Build");
 			try
 			{
-				Assembly pluginAssembly = pluginLoadContext.LoadFromAssemblyPath(dllFullPath);
-				AppPartManager?.ApplicationParts.Add(new AssemblyPart(pluginAssembly));
-				AppLoadedPlugins[dllFullPath] = (pluginAssembly, pluginLoadContext, new WeakReference(pluginLoadContext));
-				AppActionDescriptor?.NotifyChange();
+				DynamicCodeService.Build();
 			}
 			catch (Exception ex)
 			{
-				try { pluginLoadContext.Unload(); } catch { }
-				throw new Exception($"Failed to load plugin assembly: {ex.Message}");
+				buildActivity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+				LogManager.LogError($"Dynamic build failed: {ex.Message}");
+				return PluginLoadResult.Failed(DynamicCodeService.AsmPath, ex);
 			}
-		}
-		public static void UnloadPlugin(string pluginPath)
-		{
-			if (string.IsNullOrEmpty(pluginPath)) throw new Exception("Plugin path must be provided for unloading.");
-			if (!AppLoadedPlugins.TryRemove(pluginPath, out var pluginInfo)) throw new Exception($"Plugin '{pluginPath}' was not found in the loaded plugins list.");
+			finally { buildActivity?.Dispose(); }
 
-			var (assemblyToUnload, contextToUnload, contextWeakRef) = pluginInfo;
-
-			try
+			fileInfo = new(DynamicCodeService.AsmPath);
+			if (!fileInfo.Exists)
 			{
-				var partToRemove = AppPartManager?.ApplicationParts.OfType<AssemblyPart>().FirstOrDefault(p => p.Assembly == assemblyToUnload);
-				if (partToRemove != null) AppPartManager?.ApplicationParts.Remove(partToRemove);
-
-				AppActionDescriptor?.NotifyChange();
-
-				contextToUnload.Unload();
-
-				GC.Collect();
-				GC.WaitForPendingFinalizers();
-				GC.Collect(); // Call again to ensure all generations are collected.
-
-				for (int i = 0; i < 10 && contextWeakRef.IsAlive; i++)
-				{
-					Thread.Sleep(100);
-					GC.Collect();
-					GC.WaitForPendingFinalizers();
-				}
-
-				string unloadStatus = contextWeakRef.IsAlive
-					? "Unload attempted, but context is still alive (likely due to lingering references)."
-					: "Unload successful: PluginLoadContext has been garbage collected.";
-
-				LogManager.LogDebug(unloadStatus);
+				return PluginLoadResult.Failed(DynamicCodeService.AsmPath, new FileNotFoundException("Built assembly not found", fileInfo.FullName));
 			}
-			catch (Exception ex)
-			{
-				LogManager.LogDebug($"Error during plugin unload for '{pluginPath}': {ex.Message}");
-				AppLoadedPlugins[pluginPath] = pluginInfo;
-			}
-		}
 
-		public static void LoadPlugins()
-		{
-			List<Assembly> loadedAssemblies = [];
-			AssemblyLoadContext.Default.Resolving += ResolveDependencies;
-			LoadNewDlls(loadedAssemblies);
+			var result = LoadPluginInternal(fileInfo.FullName, isDynamic: true);
+			result = result with { Duration = swTotal.Elapsed };
+			return result;
 		}
-		private static void LoadNewDlls(List<Assembly> loadedAssemblies)
+		#endregion
+
+		#region Public API - Loading / Unloading
+		/// <summary>Loads a plugin assembly (collectible).</summary>
+		public static PluginLoadResult LoadPlugin(string dllFullPath) => LoadPluginInternal(dllFullPath, isDynamic: false);
+		/// <summary>Unloads a plugin assembly.</summary>
+		public static PluginUnloadResult UnloadPlugin(string pluginPath) => UnloadInternal(pluginPath);
+		#endregion
+
+		#region Public API - Bulk loading
+		/// <summary>
+		/// Loads all plugin DLLs found in configured plugin directory (collectible contexts). Skips already loaded & dynamic assembly.
+		/// </summary>
+		public static IReadOnlyList<PluginLoadResult> LoadPlugins()
 		{
-			if (!Directory.Exists(PowNetConfiguration.PowNetPlugins)) return;
+			HookResolverOnce();
+			List<PluginLoadResult> results = new();
+			if (!Directory.Exists(PowNetConfiguration.PowNetPlugins)) return results;
 			string[] dllFiles = Directory.GetFiles(PowNetConfiguration.PowNetPlugins, "*.dll");
 
-			foreach (string dllFile in dllFiles)
+			foreach (var file in dllFiles)
 			{
-				try
+				if (file.Contains("DynaAsm", StringComparison.OrdinalIgnoreCase)) continue;
+				var result = LoadPluginInternal(file, isDynamic: false);
+				results.Add(result);
+			}
+			return results;
+		}
+		#endregion
+
+		#region Public API - Query
+		/// <summary>Returns snapshot of current plugin handles.</summary>
+		public static IReadOnlyCollection<PluginHandle> GetPluginHandles() => _handles.Values.ToList().AsReadOnly();
+
+		/// <summary>Attempts to get a plugin handle by path (case-insensitive).</summary>
+		public static bool TryGetPlugin(string path, out PluginHandle handle)
+		{
+			var normalized = NormalizePath(path);
+			return _handles.TryGetValue(normalized, out handle!);
+		}
+		#endregion
+
+		#region Internal core logic
+		private static PluginLoadResult LoadPluginInternal(string dllFullPath, bool isDynamic)
+		{
+			var sw = Stopwatch.StartNew();
+			if (string.IsNullOrWhiteSpace(dllFullPath))
+				return PluginLoadResult.Failed(dllFullPath, new ArgumentException("Path empty", nameof(dllFullPath)));
+
+			string normalizedPath = NormalizePath(dllFullPath);
+			if (!File.Exists(normalizedPath))
+				return PluginLoadResult.Failed(normalizedPath, new FileNotFoundException("Plugin file not found", normalizedPath));
+
+			HookResolverOnce();
+
+			if (_handles.ContainsKey(normalizedPath))
+				return PluginLoadResult.Failed(normalizedPath, new PluginAlreadyLoadedException(normalizedPath));
+
+			var loadActivity = StartActivity("Plugin.Load", normalizedPath);
+			PluginLoadContext context = new(normalizedPath);
+			Assembly assembly;
+			try
+			{
+				assembly = context.LoadFromAssemblyPath(normalizedPath);
+			}
+			catch (Exception ex)
+			{
+				TryUnloadContextSilent(context);
+				loadActivity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+				return PluginLoadResult.Failed(normalizedPath, ex);
+			}
+
+			lock (_appPartLock)
+			{
+				AppPartManager?.ApplicationParts.Add(new AssemblyPart(assembly));
+			}
+			AppActionDescriptor?.NotifyChange();
+
+			var fileInfo = new FileInfo(normalizedPath);
+			var handle = new PluginHandle(normalizedPath, assembly, context, new WeakReference(context), DateTime.UtcNow, fileInfo.Exists ? fileInfo.Length : 0, isDynamic);
+			_handles[normalizedPath] = handle;
+
+			loadActivity?.SetTag("assembly.name", assembly.GetName().Name)
+				?.SetTag("assembly.version", assembly.GetName().Version?.ToString())
+				?.SetTag("plugin.dynamic", isDynamic)
+				?.SetStatus(ActivityStatusCode.Ok);
+			loadActivity?.Dispose();
+
+			LogManager.LogDebug($"Plugin loaded: {assembly.GetName().Name} v{assembly.GetName().Version} (Dynamic={isDynamic}) Path={normalizedPath}");
+			return PluginLoadResult.Successful(normalizedPath, assembly, sw.Elapsed, isDynamic, fileInfo.Length);
+		}
+
+		private static PluginUnloadResult UnloadInternal(string pluginPath)
+		{
+			var sw = Stopwatch.StartNew();
+			if (string.IsNullOrWhiteSpace(pluginPath))
+				return PluginUnloadResult.Failed(pluginPath, new ArgumentException("Plugin path must be provided", nameof(pluginPath)));
+
+			string normalizedPath = NormalizePath(pluginPath);
+			if (!_handles.TryRemove(normalizedPath, out var handle))
+				return PluginUnloadResult.Failed(normalizedPath, new FileNotFoundException("Plugin not found in loaded list", normalizedPath));
+
+			var unloadActivity = StartActivity("Plugin.Unload", normalizedPath);
+			Exception? error = null;
+			int gcLoops = 0;
+			try
+			{
+				lock (_appPartLock)
 				{
-					string assemblyName = AssemblyName.GetAssemblyName(dllFile).FullName;
-					if (loadedAssemblies.Any(a => a.FullName == assemblyName) || assemblyName.ContainsIgnoreCase("DynaAsm")) continue;
-					FileInfo dllInfo = new(dllFile);
-					Assembly assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(dllInfo.FullName);
-					loadedAssemblies.Add(assembly);
+					var part = AppPartManager?.ApplicationParts.OfType<AssemblyPart>().FirstOrDefault(p => p.Assembly == handle.Assembly);
+					if (part != null) AppPartManager!.ApplicationParts.Remove(part);
 				}
-				catch (Exception ex)
+				AppActionDescriptor?.NotifyChange();
+
+				handle.Context.Unload();
+				for (; gcLoops < UnloadGcMaxIterations && handle.ContextWeakRef.IsAlive; gcLoops++)
 				{
-					LogManager.LogError($"Error loading DLL {Path.GetFileName(dllFile)}: {ex.Message}");
+					GC.Collect();
+					GC.WaitForPendingFinalizers();
+					Thread.Sleep(UnloadGcIterationDelayMs);
 				}
 			}
+			catch (Exception ex)
+			{
+				error = ex;
+				// revert on failure
+				_handles[normalizedPath] = handle;
+			}
+
+			bool alive = handle.ContextWeakRef.IsAlive;
+			if (error != null || alive)
+			{
+				string msg = error != null ? $"Error during plugin unload for '{normalizedPath}': {error.Message}" : $"Unload attempted, context still alive after {gcLoops} GC cycles.";
+				LogManager.LogDebug(msg);
+				unloadActivity?.SetStatus(ActivityStatusCode.Error, msg);
+				unloadActivity?.Dispose();
+				return PluginUnloadResult.Failed(normalizedPath, error ?? new InvalidOperationException("Context still alive"), sw.Elapsed, gcLoops, alive);
+			}
+
+			LogManager.LogDebug($"Plugin unloaded: {normalizedPath} (GC loops={gcLoops})");
+			unloadActivity?.SetStatus(ActivityStatusCode.Ok);
+			unloadActivity?.Dispose();
+			return PluginUnloadResult.Successful(normalizedPath, sw.Elapsed, gcLoops);
 		}
+		#endregion
+
+		#region Dependency resolving
+		private static void HookResolverOnce()
+		{
+			if (Interlocked.Exchange(ref _resolverHooked, 1) == 0)
+			{
+				AssemblyLoadContext.Default.Resolving += ResolveDependencies;
+			}
+		}
+
 		private static Assembly? ResolveDependencies(AssemblyLoadContext context, AssemblyName assemblyName)
 		{
-			string assemblyPath = Path.Combine(AppContext.BaseDirectory, assemblyName.Name + ".dll");
-			if (File.Exists(assemblyPath)) return context.LoadFromAssemblyPath(assemblyPath);
-			return null;
+			string simple = assemblyName.Name ?? string.Empty;
+			if (_dependencyCache.TryGetValue(simple, out var cached)) return cached;
+
+			Assembly? resolved = null;
+			try
+			{
+				string baseDirPath = Path.Combine(AppContext.BaseDirectory, simple + ".dll");
+				if (File.Exists(baseDirPath))
+					resolved = context.LoadFromAssemblyPath(baseDirPath);
+				else if (Directory.Exists(PowNetConfiguration.PowNetPlugins))
+				{
+					string pluginCandidate = Directory.GetFiles(PowNetConfiguration.PowNetPlugins, simple + ".dll", SearchOption.AllDirectories).FirstOrDefault() ?? string.Empty;
+					if (!string.IsNullOrEmpty(pluginCandidate) && File.Exists(pluginCandidate))
+						resolved = context.LoadFromAssemblyPath(pluginCandidate);
+				}
+			}
+			catch (Exception ex)
+			{
+				LogManager.LogDebug($"Dependency resolve failed for {simple}: {ex.Message}");
+			}
+			_dependencyCache[simple] = resolved; // cache null as negative lookup too
+			return resolved;
 		}
+		#endregion
+
+		#region Helpers & utilities
+		private static string NormalizePath(string path) => Path.GetFullPath(path);
+		private static void TryUnloadContextSilent(PluginLoadContext ctx) { try { ctx.Unload(); } catch { } }
+		private static Activity? StartActivity(string name, string? path = null)
+		{
+			var activity = new Activity(name).Start();
+			if (path != null) activity.AddTag("plugin.path", path);
+			return activity;
+		}
+		#endregion
 	}
 
-	public class PluginLoadContext(string pluginPath) : AssemblyLoadContext(isCollectible: true)
-	{
-		private AssemblyDependencyResolver _resolver = new(pluginPath);
+	#region Models
+	public sealed record PluginHandle(
+		string Path,
+		Assembly Assembly,
+		PluginLoadContext Context,
+		WeakReference ContextWeakRef,
+		DateTime LoadedUtc,
+		long FileSizeBytes,
+		bool IsDynamic);
 
+	public readonly record struct PluginLoadResult(
+		bool Success,
+		string Path,
+		Assembly? Assembly,
+		TimeSpan Duration,
+		Exception? Error,
+		bool IsDynamic,
+		long FileSizeBytes)
+	{
+		public static PluginLoadResult Successful(string path, Assembly asm, TimeSpan duration, bool isDynamic, long size) => new(true, path, asm, duration, null, isDynamic, size);
+		public static PluginLoadResult Failed(string path, Exception error) => new(false, path, null, TimeSpan.Zero, error, false, 0);
+	}
+
+	public readonly record struct PluginUnloadResult(
+		bool Success,
+		string Path,
+		TimeSpan Duration,
+		Exception? Error,
+		int GcLoops,
+		bool ContextStillAlive)
+	{
+		public static PluginUnloadResult Successful(string path, TimeSpan duration, int gcLoops) => new(true, path, duration, null, gcLoops, false);
+		public static PluginUnloadResult Failed(string path, Exception error, TimeSpan? duration = null, int gcLoops = 0, bool alive = false) => new(false, path, duration ?? TimeSpan.Zero, error, gcLoops, alive);
+	}
+	#endregion
+
+	#region Custom exceptions
+	public class PluginLoadException : Exception { public string PluginPath { get; } public PluginLoadException(string path, Exception inner) : base($"Failed to load plugin '{path}': {inner.Message}", inner) => PluginPath = path; }
+	public class PluginUnloadException : Exception { public string PluginPath { get; } public PluginUnloadException(string path, Exception inner) : base($"Failed to unload plugin '{path}': {inner.Message}", inner) => PluginPath = path; }
+	public class PluginAlreadyLoadedException : Exception { public string PluginPath { get; } public PluginAlreadyLoadedException(string path) : base($"Plugin already loaded: {path}") => PluginPath = path; }
+	#endregion
+
+	public class PluginLoadContext : AssemblyLoadContext
+	{
+		private readonly AssemblyDependencyResolver _resolver;
+		public PluginLoadContext(string pluginPath) : base(isCollectible: true) => _resolver = new AssemblyDependencyResolver(pluginPath);
 		protected override Assembly? Load(AssemblyName assemblyName)
 		{
 			string? assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);
