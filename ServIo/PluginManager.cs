@@ -71,8 +71,8 @@ namespace ServIo
 		{
 			HookResolverOnce();
 			List<PluginLoadResult> results = new();
-			if (!Directory.Exists(PowNetConfiguration.PowNetPlugins)) return results;
-			string[] dllFiles = Directory.GetFiles(PowNetConfiguration.PowNetPlugins, "*.dll");
+			if (!Directory.Exists(PowNetConfiguration.PluginsPath)) return results;
+			string[] dllFiles = Directory.GetFiles(PowNetConfiguration.PluginsPath, "*.dll");
 
 			foreach (var file in dllFiles)
 			{
@@ -211,9 +211,9 @@ namespace ServIo
 				string baseDirPath = Path.Combine(AppContext.BaseDirectory, simple + ".dll");
 				if (File.Exists(baseDirPath))
 					resolved = context.LoadFromAssemblyPath(baseDirPath);
-				else if (Directory.Exists(PowNetConfiguration.PowNetPlugins))
+				else if (Directory.Exists(PowNetConfiguration.PluginsPath))
 				{
-					string pluginCandidate = Directory.GetFiles(PowNetConfiguration.PowNetPlugins, simple + ".dll", SearchOption.AllDirectories).FirstOrDefault() ?? string.Empty;
+					string pluginCandidate = Directory.GetFiles(PowNetConfiguration.PluginsPath, simple + ".dll", SearchOption.AllDirectories).FirstOrDefault() ?? string.Empty;
 					if (!string.IsNullOrEmpty(pluginCandidate) && File.Exists(pluginCandidate))
 						resolved = context.LoadFromAssemblyPath(pluginCandidate);
 				}

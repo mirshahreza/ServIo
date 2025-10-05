@@ -1,0 +1,50 @@
+﻿{
+  "NamespaceName": "Zzz",
+  "ControllerName": "AppEndCoreApi",
+  "ApiConfs": [
+    {
+      "ApiName": "Login",
+      "CheckAccessLevel": "OpenForAllUsers",
+      "AllowedRoles": null,
+      "AllowedUsers": null,
+      "DeniedRoles": null,
+      "DeniedUsers": null,
+      "CacheLevel": "None",
+      "CacheSeconds": 0,
+      "LogEnabled": false
+    },
+    {
+      "ApiName": "ReloadCode",
+      "CheckAccessLevel": "CheckAccessRules",
+      "AllowedRoles": null,
+      "AllowedUsers": null,
+      "DeniedRoles": null,
+      "DeniedUsers": null,
+      "CacheLevel": "None",
+      "CacheSeconds": 0,
+      "LogEnabled": false
+    },
+    {
+      "ApiName": "PingMe",
+      "CheckAccessLevel": "OpenForAllUsers",
+      "AllowedRoles": null,
+      "AllowedUsers": null,
+      "DeniedRoles": null,
+      "DeniedUsers": null,
+      "CacheLevel": "None",
+      "CacheSeconds": 0,
+      "LogEnabled": false
+    },
+    {
+      "ApiName": "Echo",
+      "CheckAccessLevel": "OpenForAllUsers",
+      "AllowedRoles": null,
+      "AllowedUsers": null,
+      "DeniedRoles": null,
+      "DeniedUsers": null,
+      "CacheLevel": "None",
+      "CacheSeconds": 0,
+      "LogEnabled": false
+    }
+  ]
+}

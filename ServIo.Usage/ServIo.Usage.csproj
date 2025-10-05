@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ServIo\ServIo.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="workspace\client\" />
+    <Folder Include="workspace\log\" />
+    <Folder Include="workspace\plugins\" />
+  </ItemGroup>
+
+  <!-- Exclude dynamic server scripts; they are compiled & loaded at runtime via PluginManager -->
+  <ItemGroup>
+    <Compile Remove="workspace\server\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="workspace\server\Zzz.AppEndCoreApi.cs" />
+    <Compile Include="workspace\server\Zzz.AppEndCoreUtils.cs" />
+  </ItemGroup>
+
+</Project>
