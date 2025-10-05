@@ -1,6 +1,6 @@
 ﻿{
   "NamespaceName": "Zzz",
-  "ControllerName": "AppEndCoreApi",
+  "ControllerName": "BaseCoreApi",
   "ApiConfs": [
     {
       "ApiName": "Login",

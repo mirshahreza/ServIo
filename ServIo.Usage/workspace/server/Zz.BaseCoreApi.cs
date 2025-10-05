@@ -16,11 +16,11 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 
-namespace Zzz
+namespace Zz
 {
-	[Route("Zzz/AppEndCoreApi")]
+	[Route("Zz/BaseCoreApi")]
 	[ApiController]
-	public class AppEndCoreApi : ControllerBase
+	public class BaseCoreApi : ControllerBase
 	{
 		[HttpPost("Login")]
 		public JsonObject Login(string UserName, string Password)
@@ -43,7 +43,7 @@ namespace Zzz
 
 			if (dt.Rows.Count > 0)
 			{
-				UserServerObject uso = AppEndCoreUtils.CreateUserServerObject(UserName);
+				UserServerObject uso = BaseCoreUtils.CreateUserServerObject(UserName);
 				uso.ToCache();
 				return new JsonObject
 				{
@@ -57,7 +57,7 @@ namespace Zzz
 		[HttpPost("GetUserServerObjectByContext")]
 		public string GetUserServerObjectByContext()
 		{
-			UserServerObject uso = AppEndCoreUtils.CreateUserServerObject("admin");
+			UserServerObject uso = BaseCoreUtils.CreateUserServerObject("admin");
 			return uso.ToClientVersion().ToJsonStringByBuiltIn();
 		}
 

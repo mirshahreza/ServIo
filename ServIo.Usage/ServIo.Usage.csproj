@@ -21,8 +21,10 @@
     <Compile Remove="workspace\server\**\*.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="workspace\server\Zzz.AppEndCoreApi.cs" />
-    <Compile Include="workspace\server\Zzz.AppEndCoreUtils.cs" />
+    <Compile Include="workspace\server\Zz.BaseAdminUtils.cs" />
+    <Compile Include="workspace\server\Zz.BaseCoreApi.cs" />
+    <Compile Include="workspace\server\Zz.BaseCoreUtils.cs" />
+    <Compile Include="workspace\server\Zz.BaseUserUtils.cs" />
   </ItemGroup>
 
 </Project>

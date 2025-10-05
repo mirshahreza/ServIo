@@ -56,18 +56,18 @@ namespace ServIo
 		public static string GetClientAgent(this HttpContext context) => context.Request.Headers["User-Agent"].ToString();
 		public static bool IsPostFace(this HttpContext context) => context.Request.Method == HttpMethods.Post || context.Request.Method == HttpMethods.Put || context.Request.Method == HttpMethods.Patch;
 
-		public static void AddSuccessHeaders(this HttpContext context, long duration, PowNet.Services.ApiCallInfo appEndWebApiInfo) => AddAppEndStandardHeaders(context, duration, appEndWebApiInfo, StatusCodes.Status200OK, "Status200OK");
-		public static void AddInternalErrorHeaders(this HttpContext context, long duration, Exception ex, PowNet.Services.ApiCallInfo appEndWebApiInfo) => AddAppEndStandardHeaders(context, duration, appEndWebApiInfo, StatusCodes.Status500InternalServerError, "Status500InternalServerError");
-		public static void AddUnauthorizedErrorHeaders(this HttpContext context, long duration, Exception ex, PowNet.Services.ApiCallInfo appEndWebApiInfo) => AddAppEndStandardHeaders(context, duration, appEndWebApiInfo, StatusCodes.Status401Unauthorized, "Status401Unauthorized");
-		public static void AddNotFoundErrorHeaders(this HttpContext context, long duration, PowNet.Services.ApiCallInfo appEndWebApiInfo) => AddAppEndStandardHeaders(context, duration, appEndWebApiInfo, StatusCodes.Status404NotFound, "Status404NotFound");
+		public static void AddSuccessHeaders(this HttpContext context, long duration, PowNet.Services.ApiCallInfo apiCallInfo) => AddServIoStandardHeaders(context, duration, apiCallInfo, StatusCodes.Status200OK, "Status200OK");
+		public static void AddInternalErrorHeaders(this HttpContext context, long duration, Exception ex, PowNet.Services.ApiCallInfo apiCallInfo) => AddServIoStandardHeaders(context, duration, apiCallInfo, StatusCodes.Status500InternalServerError, "Status500InternalServerError");
+		public static void AddUnauthorizedErrorHeaders(this HttpContext context, long duration, Exception ex, PowNet.Services.ApiCallInfo apiCallInfo) => AddServIoStandardHeaders(context, duration, apiCallInfo, StatusCodes.Status401Unauthorized, "Status401Unauthorized");
+		public static void AddNotFoundErrorHeaders(this HttpContext context, long duration, PowNet.Services.ApiCallInfo apiCallInfo) => AddServIoStandardHeaders(context, duration, apiCallInfo, StatusCodes.Status404NotFound, "Status404NotFound");
 
-		private static void AddAppEndStandardHeaders(this HttpContext context, long duration, PowNet.Services.ApiCallInfo appEndWebApiInfo, int statusCode, string statusTitle)
+		private static void AddServIoStandardHeaders(this HttpContext context, long duration, PowNet.Services.ApiCallInfo apiCallInfo, int statusCode, string statusTitle)
 		{
-			context.Response.Headers["Server"] = "AppEnd";
+			context.Response.Headers["Server"] = "ServIo";
 			context.Response.Headers["InstanceName"] = PowNetConfiguration.PowNetSection["InstanceName"].ToStringEmpty();
-			context.Response.Headers["X-Execution-Path"] = appEndWebApiInfo.RequestPath;
-			context.Response.Headers["X-Execution-Controller"] = appEndWebApiInfo.ControllerName;
-			context.Response.Headers["X-Execution-Action"] = appEndWebApiInfo.ApiName;
+			context.Response.Headers["X-Execution-Path"] = apiCallInfo.RequestPath;
+			context.Response.Headers["X-Execution-Controller"] = apiCallInfo.ControllerName;
+			context.Response.Headers["X-Execution-Action"] = apiCallInfo.ApiName;
 			context.Response.Headers["X-Execution-Duration"] = duration.ToString();
 			context.Response.Headers["X-Execution-User"] = context.User.Identity?.Name ?? string.Empty;
 			context.Response.Headers["X-Result-StatusCode"] = statusCode.ToString();
