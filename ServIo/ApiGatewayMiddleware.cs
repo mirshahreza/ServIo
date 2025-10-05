@@ -8,7 +8,6 @@ using PowNet.Implementations.Authentication;
 using PowNet.Logging;
 using PowNet.Models;
 using PowNet.Services;
-using ServIo.Implementations;
 using System.Diagnostics;
 using System.Text;
 

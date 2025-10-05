@@ -4,7 +4,7 @@ using PowNet.Abstractions.Authentication;
 using PowNet.Configuration;
 using PowNet.Services;
 
-namespace ServIo.Implementations;
+namespace ServIo;
 
 /// <summary>
 /// Sized cache service wrapper to satisfy MemoryCache size-limit requirement while reusing PowNet shared cache.
